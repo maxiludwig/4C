@@ -146,11 +146,17 @@ namespace ReducedLung
       {
         std::vector<int> element_blocks;
         /**
-         * Reference volume of each terminal unit at the start of the simulation. Without a
-         * recruitment law it stays constant; with one it is the initial value of the reference
-         * volume state and must lie within [v0_min, v0_max].
+         * Reference (stress-free) volume of each terminal unit at the start of the simulation.
+         * Without a recruitment law it stays constant; with one it is the initial value of the
+         * reference volume state and must lie within [v0_min, v0_max].
          */
         Core::IO::InputField<double> v0;
+        /**
+         * Volume of each terminal unit at the start of the simulation, e.g. the imaged gas volume
+         * of a pre-stretched unit. A value of 0 (default) means that the unit starts at its
+         * reference volume v0, i.e. stress-free.
+         */
+        Core::IO::InputField<double> initial_volume;
 
         struct RecruitmentModel
         {

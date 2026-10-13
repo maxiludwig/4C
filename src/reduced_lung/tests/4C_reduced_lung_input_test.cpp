@@ -74,7 +74,7 @@ reduced_dimensional_lung:
            function_id + "\n";
   }
 
-  void match_input(const std::string& yaml_string)
+  Core::IO::InputParameterContainer match_input(const std::string& yaml_string)
   {
     Core::IO::InputParameterContainer container;
     ryml::Tree tree = Core::IO::init_yaml_tree_with_exceptions();
@@ -83,6 +83,23 @@ reduced_dimensional_lung:
 
     Core::IO::ConstYamlNodeRef node(root, "");
     ReducedLung::valid_parameters().match(node, container);
+    return container;
+  }
+
+  //! The valid input from above with an `initial_volume` block added to the terminal units.
+  std::string input_with_initial_volume(const std::string& initial_volume_block)
+  {
+    std::string input = input_with_pressure_condition("1", "1");
+    const std::string v0_block = "      v0:\n        constant: 1.0\n";
+    input.insert(input.find(v0_block) + v0_block.size(), initial_volume_block);
+    return input;
+  }
+
+  double parsed_initial_volume(const std::string& yaml_string)
+  {
+    const auto container = match_input(yaml_string);
+    return container.get<ReducedLung::ReducedLungParameters>("reduced_dimensional_lung")
+        .lung_tree.terminal_units.initial_volume.at(0, "initial_volume");
   }
 
   TEST(ReducedLungInputTest, AcceptsPositiveDefinitionAndFunctionIds)
@@ -101,5 +118,18 @@ reduced_dimensional_lung:
   {
     FOUR_C_EXPECT_THROW_WITH_MESSAGE(match_input(input_with_pressure_condition("1", "-1")),
         Core::Exception, "'function_id' does not pass validation");
+  }
+
+  //! Without `initial_volume` the default 0 is stored, i.e. the units start at v0.
+  TEST(ReducedLungInputTest, InitialVolumeDefaultsToZero)
+  {
+    EXPECT_DOUBLE_EQ(parsed_initial_volume(input_with_pressure_condition("1", "1")), 0.0);
+  }
+
+  TEST(ReducedLungInputTest, ReadsInitialVolume)
+  {
+    EXPECT_DOUBLE_EQ(parsed_initial_volume(input_with_initial_volume(
+                         "      initial_volume:\n        constant: 2.5\n")),
+        2.5);
   }
 }  // namespace

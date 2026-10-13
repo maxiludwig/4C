@@ -1594,6 +1594,7 @@ four_c_test(
 four_c_test(TEST_FILE reduced_lung_3_aw_2_tu_4elemax_and_kv.4C.yaml REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_3_aw_2_tu_4elemax_and_kv.4C.yaml NP 3 REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_terminal_unit.4C.yaml REQUIRED_DEPENDENCIES VTK)
+four_c_test(TEST_FILE reduced_lung_terminal_unit_initial_volume.4C.yaml REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_terminal_unit_newton_tree.4C.yaml REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_terminal_unit_recruitment_pressure_only.4C.yaml REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_terminal_unit_recruitment_pressure_time.4C.yaml REQUIRED_DEPENDENCIES VTK)

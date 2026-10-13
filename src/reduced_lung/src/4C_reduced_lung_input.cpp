@@ -657,11 +657,21 @@ Core::IO::InputSpec ReducedLung::valid_parameters()
                           input_field<double>("v0",
                               {
                                   .description =
-                                      "Reference volume of the terminal unit at simulation start. "
-                                      "Constant without a recruitment law; initial value of the "
-                                      "recruiting reference volume otherwise.",
+                                      "Reference (stress-free) volume of the terminal unit at "
+                                      "simulation start. Constant without a recruitment law; "
+                                      "initial value of the recruiting reference volume otherwise.",
                                   .store = in_struct(
                                       &ReducedLungParameters::LungTree::TerminalUnits::v0),
+                              }),
+                          input_field<double>("initial_volume",
+                              {
+                                  .description =
+                                      "Volume of the terminal unit at simulation start, e.g. the "
+                                      "imaged gas volume of a pre-stretched unit. 0 (default) "
+                                      "starts the unit at its reference volume v0.",
+                                  .store = in_struct(&ReducedLungParameters::LungTree::
+                                          TerminalUnits::initial_volume),
+                                  .default_value = 0.0,
                               }),
                           rheological_model_spec_terminal_unit,
                           elasticity_model_spec_terminal_units,

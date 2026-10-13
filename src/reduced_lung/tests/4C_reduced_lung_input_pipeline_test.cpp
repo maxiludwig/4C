@@ -14,6 +14,7 @@
 #include "4C_reduced_lung_helpers.hpp"
 #include "4C_reduced_lung_input.hpp"
 #include "4C_reduced_lung_terminal_unit_model_registry.hpp"
+#include "4C_utils_exceptions.hpp"
 
 #include <mpi.h>
 
@@ -204,6 +205,52 @@ namespace
           std::get<TerminalUnits::KelvinVoigt>(terminal_model.rheological_model);
       EXPECT_EQ(kelvin_voigt.viscosity_eta, (std::vector<double>{0.0, 0.0}));
     }
+  }
+
+  //! Build the two terminal units (elements 3 and 4) of the tree above from the parameters.
+  TerminalUnits::TerminalUnitContainer make_terminal_units(const ReducedLungParameters& params)
+  {
+    TerminalUnits::TerminalUnitContainer terminal_units;
+    for (const int element_id : {3, 4})
+    {
+      TerminalUnits::ModelRegistry::add_terminal_unit_with_model_selection(terminal_units,
+          element_id, element_id - 3, params,
+          params.lung_tree.terminal_units.rheological_model.rheological_model_type.at(
+              element_id, "rheological_model_type"),
+          params.lung_tree.terminal_units.elasticity_model.elasticity_model_type.at(
+              element_id, "elasticity_model_type"),
+          params.lung_tree.terminal_units.recruitment_model.pressure_law_type.at(
+              element_id, "pressure_law_type"));
+    }
+    return terminal_units;
+  }
+
+  //! A given initial volume sets the start volume, the reference volume stays v0.
+  TEST(ReducedLungInputPipelineTest, TerminalUnitsStartAtInitialVolume)
+  {
+    auto params = make_parameters();
+    params.lung_tree.terminal_units.initial_volume = Core::IO::InputField<double>(5.0);
+
+    const auto terminal_units = make_terminal_units(params);
+
+    ASSERT_EQ(terminal_units.models.size(), 1u);
+    const auto& data = terminal_units.models.front().data;
+    ASSERT_EQ(data.volume_v.size(), 2u);
+    const double v0 = (4.0 / 3.0) * std::numbers::pi;
+    for (size_t i = 0; i < data.volume_v.size(); ++i)
+    {
+      EXPECT_DOUBLE_EQ(data.volume_v[i], 5.0);
+      EXPECT_DOUBLE_EQ(data.reference_volume_context[i].v0_eff, v0);
+      EXPECT_DOUBLE_EQ(data.reference_volume_context[i].inv_v0_eff, 1.0 / v0);
+    }
+  }
+
+  TEST(ReducedLungInputPipelineTest, RejectsNegativeInitialVolume)
+  {
+    auto params = make_parameters();
+    params.lung_tree.terminal_units.initial_volume = Core::IO::InputField<double>(-1.0);
+
+    EXPECT_THROW(make_terminal_units(params), Core::Exception);
   }
 
   TEST(ReducedLungInputPipelineTest, NonlinearSolverDefaultsToNox)

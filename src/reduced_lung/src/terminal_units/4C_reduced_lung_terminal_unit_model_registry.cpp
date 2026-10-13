@@ -98,12 +98,19 @@ namespace ReducedLung
       TerminalUnits::Recruitment::append_model_parameters(model.recruitment_model,
           global_element_id, v0, parameters.lung_tree.terminal_units.recruitment_model);
       const size_t element_index = model.data.number_of_elements() - 1;
-      const double initial_volume =
+      const double reference_volume =
           TerminalUnits::Recruitment::reference_volume_n(model.recruitment_model, element_index);
-      model.data.volume_v.push_back(initial_volume);
+      // An initial volume of 0 (default) starts the unit stress-free at its reference volume.
+      const double given_initial_volume = parameters.lung_tree.terminal_units.initial_volume.at(
+          global_element_id, "initial_volume");
+      FOUR_C_ASSERT_ALWAYS(given_initial_volume >= 0.0,
+          "Initial volume {} of terminal unit {} must be positive (or 0 to start at v0).",
+          given_initial_volume, global_element_id + 1);
+      model.data.volume_v.push_back(
+          given_initial_volume > 0.0 ? given_initial_volume : reference_volume);
       // Initial value of the cache the internal state updater recomputes on every dof change.
       model.data.reference_volume_context.push_back(
-          TerminalUnits::make_reference_volume_context(initial_volume, 0.0));
+          TerminalUnits::make_reference_volume_context(reference_volume, 0.0));
 
       TerminalUnits::Rheology::append_model_parameters(model.rheological_model, global_element_id,
           parameters.lung_tree.terminal_units.rheological_model);
