@@ -502,6 +502,59 @@ Core::IO::InputSpec ReducedLung::valid_parameters()
           },
           typeid(BoundaryConditions));
 
+  using TimeSwitchedDefinition = BoundaryConditions::TimeSwitchedDefinition;
+  const Core::IO::InputSpec time_switched_definition_spec = all_of({
+      definition_id_spec,
+      list("phases",
+          all_of({
+              parameter<TimeSwitchedDefinition::Variable>(
+                  "variable", {.description = "The inlet variable this phase prescribes."}),
+              parameter<int>("function_id",
+                  {
+                      .description = "Id of the function of time prescribing the variable. It is "
+                                     "evaluated at the simulation time, not at the time since the "
+                                     "start of the phase.",
+                      .validator = Validators::positive<int>(),
+                  }),
+              parameter<double>("end_time",
+                  {
+                      .description = "Time at which this phase ends. The phase is active for "
+                                     "steps ending after the end_time of the previous phase "
+                                     "(or after 0 for the first phase) and up to this time.",
+                      .validator = Validators::positive<double>(),
+                  }),
+          }),
+          {.description = "Phases in chronological order. Each phase starts where the previous "
+                          "one ends, so the phases cover the time without gaps or overlaps."}),
+  });
+
+  const auto store_time_switched_definitions =
+      StoreFunction<Core::IO::InputParameterContainer::List>(
+          [](Storage& storage, Core::IO::InputParameterContainer::List&& value)
+          {
+            FOUR_C_ASSERT(storage.type() == typeid(BoundaryConditions),
+                "Implementation error: expected BoundaryConditions storage.");
+
+            auto& target = std::any_cast<BoundaryConditions&>(storage).time_switched;
+            // The store also runs from set_default_value(), so it may see the same target twice.
+            target.clear();
+            for (const auto& entry : value)
+            {
+              TimeSwitchedDefinition definition{.id = entry.get<int>("id"), .phases = {}};
+              for (const auto& phase : entry.get_list("phases"))
+              {
+                definition.phases.push_back(TimeSwitchedDefinition::Phase{
+                    .variable = phase.get<TimeSwitchedDefinition::Variable>("variable"),
+                    .function_id = phase.get<int>("function_id"),
+                    .end_time = phase.get<double>("end_time")});
+              }
+              target.push_back(std::move(definition));
+            }
+
+            return StoreStatus::ok();
+          },
+          typeid(BoundaryConditions));
+
   Core::IO::InputSpec boundary_conditions_spec =
       group<ReducedLungParameters::BoundaryConditions>("boundary_conditions",
           {
@@ -526,6 +579,15 @@ Core::IO::InputSpec ReducedLung::valid_parameters()
                           "from the curve given below at the total terminal unit volume.",
                       .required = false,
                       .store = store_pleural_pressure_definitions,
+                  }),
+              list("time_switched", time_switched_definition_spec,
+                  {
+                      .description =
+                          "Reusable definitions of an inlet boundary condition that switches "
+                          "between a prescribed pressure and a prescribed flow at given times. "
+                          "The physical state carries over across a switch.",
+                      .required = false,
+                      .store = store_time_switched_definitions,
                   }),
           },
           {

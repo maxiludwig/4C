@@ -19,10 +19,15 @@
 #include "4C_utils_function_manager.hpp"
 #include "4C_utils_function_of_time.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <format>
 #include <map>
 #include <ranges>
 #include <set>
+#include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -36,6 +41,7 @@ namespace ReducedLung
     namespace
     {
       using InputFromFunction = ReducedLungParameters::BoundaryConditions::FromFunctionDefinition;
+      using InputTimeSwitched = ReducedLungParameters::BoundaryConditions::TimeSwitchedDefinition;
 
       /**
        * Human-readable name of a constrained variable, for error messages.
@@ -118,6 +124,85 @@ namespace ReducedLung
       }
 
       /**
+       * The inlet dofs of the variable a switching model constrains in @p phase.
+       */
+      [[nodiscard]] const std::vector<int>& switched_local_dof_ids(
+          const BoundaryConditionModel& model, const PhaseSchedule::Phase& phase)
+      {
+        switch (phase.variable)
+        {
+          case ConstrainedVariable::Pressure:
+            return model.data.inlet_pressure_local_dof_id;
+          case ConstrainedVariable::Flow:
+            return model.data.inlet_flow_local_dof_id;
+        }
+        FOUR_C_THROW("Unknown constrained variable of a time-switched boundary condition.");
+      }
+
+      /**
+       * Constrain the inlet dof the active phase selects to the value of the phase's function.
+       */
+      void assemble_switched_residual(const BoundaryConditionModel& model,
+          Core::LinAlg::Vector<double>& rhs, const Core::LinAlg::Vector<double>& dofs,
+          const AssemblyContext& assembly_context)
+      {
+        const auto& phase =
+            std::get<PhaseSchedule>(model.value_model).active_phase(assembly_context.time);
+        const double value = prescribed_value(phase.value, assembly_context, -1);
+
+        auto residual_values = rhs.local_values_as_span();
+        const auto dof_values = dofs.local_values_as_span();
+        const auto& local_dof_id = switched_local_dof_ids(model, phase);
+        const auto& local_equation_id = model.data.local_equation_id;
+        for (size_t i = 0; i < model.data.size(); ++i)
+        {
+          residual_values[static_cast<std::size_t>(local_equation_id[i])] =
+              dof_values[local_dof_id[i]] - value;
+        }
+      }
+
+      /**
+       * The unit coefficients of a switching row on (inlet pressure, inlet flow) at @p time.
+       */
+      [[nodiscard]] std::array<double, 2> switched_coefficients(
+          const BoundaryConditionModel& model, double time)
+      {
+        switch (std::get<PhaseSchedule>(model.value_model).active_phase(time).variable)
+        {
+          case ConstrainedVariable::Pressure:
+            return {1.0, 0.0};
+          case ConstrainedVariable::Flow:
+            return {0.0, 1.0};
+        }
+        FOUR_C_THROW("Unknown constrained variable of a time-switched boundary condition.");
+      }
+
+      /**
+       * A switching row holds both inlet dofs, so the matrix graph stays valid across a switch:
+       * a unit entry on the dof of the active phase and an explicit zero on the other one.
+       */
+      void assemble_switched_jacobian(const BoundaryConditionModel& model,
+          Core::LinAlg::SparseMatrix& sysmat, const Core::LinAlg::Vector<double>& /*dofs*/,
+          const AssemblyContext& assembly_context)
+      {
+        const auto values = switched_coefficients(model, assembly_context.time);
+        for (size_t i = 0; i < model.data.size(); ++i)
+        {
+          const std::array<int, 2> local_dof_ids{
+              model.data.inlet_pressure_local_dof_id[i], model.data.inlet_flow_local_dof_id[i]};
+          const int row = model.data.local_equation_id[i];
+          if (!sysmat.filled())
+          {
+            sysmat.insert_my_values(row, 2, values.data(), local_dof_ids.data());
+          }
+          else
+          {
+            sysmat.replace_my_values(row, 2, values.data(), local_dof_ids.data());
+          }
+        }
+      }
+
+      /**
        * Bind a value model to the callable that assembles its residual. The concrete alternative
        * is captured here, so the assembly loop never inspects the variant again. Each entry is
        * evaluated separately by its own global_element_id, since the value model may vary
@@ -128,17 +213,26 @@ namespace ReducedLung
         return std::visit(
             [](const auto& value) -> ResidualEvaluator
             {
-              return [value](const BoundaryConditionModel& model, Core::LinAlg::Vector<double>& rhs,
-                         const Core::LinAlg::Vector<double>& dofs,
-                         const AssemblyContext& assembly_context)
+              if constexpr (std::is_same_v<std::decay_t<decltype(value)>, PhaseSchedule>)
               {
-                apply_dirichlet_residual(model, rhs, dofs,
-                    [&](size_t i)
-                    {
-                      return prescribed_value(
-                          value, assembly_context, model.data.global_element_id[i]);
-                    });
-              };
+                // Reads the schedule from the model, since the constrained dof switches as well.
+                return assemble_switched_residual;
+              }
+              else
+              {
+                return
+                    [value](const BoundaryConditionModel& model, Core::LinAlg::Vector<double>& rhs,
+                        const Core::LinAlg::Vector<double>& dofs,
+                        const AssemblyContext& assembly_context)
+                {
+                  apply_dirichlet_residual(model, rhs, dofs,
+                      [&](size_t i)
+                      {
+                        return prescribed_value(
+                            value, assembly_context, model.data.global_element_id[i]);
+                      });
+                };
+              }
             },
             value_model);
       }
@@ -188,6 +282,77 @@ namespace ReducedLung
       }
 
       /**
+       * Build the schedule of a time-switched definition. The phases must follow each other,
+       * cover the whole simulation, and switch on the time grid, so that a switch never falls
+       * inside a timestep.
+       */
+      [[nodiscard]] PhaseSchedule make_phase_schedule(const InputTimeSwitched& definition,
+          const ReducedLungParameters::Dynamics& dynamics,
+          const Core::Utils::FunctionManager& function_manager)
+      {
+        if (definition.phases.empty())
+        {
+          FOUR_C_THROW(
+              "The time-switched boundary condition definition {} needs at least one phase.",
+              definition.id);
+        }
+
+        const double dt = dynamics.time_increment;
+        const double end_time_of_simulation = dynamics.number_of_steps * dt;
+        // Relative to dt, so it absorbs the accumulated rounding of the simulation time but is
+        // far below a timestep.
+        const double time_tolerance = 1.0e-6 * dt;
+
+        PhaseSchedule schedule{.phases = {}, .time_tolerance = time_tolerance};
+        double previous_end_time = 0.0;
+        for (std::size_t k = 0; k < definition.phases.size(); ++k)
+        {
+          const auto& phase = definition.phases[k];
+          const bool is_last_phase = k + 1 == definition.phases.size();
+          if (phase.end_time <= previous_end_time)
+          {
+            FOUR_C_THROW(
+                "The phases of the time-switched boundary condition definition {} must be sorted "
+                "by strictly increasing end_time, but phase {} ends at {} after the previous "
+                "phase ended at {}.",
+                definition.id, k + 1, phase.end_time, previous_end_time);
+          }
+          if (!is_last_phase && dt > 0.0)
+          {
+            const double steps = phase.end_time / dt;
+            if (std::abs(steps - std::round(steps)) * dt > time_tolerance)
+            {
+              FOUR_C_THROW(
+                  "Phase {} of the time-switched boundary condition definition {} ends at {}, "
+                  "which is not a multiple of the time_increment {}. A switch must coincide with "
+                  "the end of a timestep.",
+                  k + 1, definition.id, phase.end_time, dt);
+            }
+          }
+          if (is_last_phase && phase.end_time < end_time_of_simulation - time_tolerance)
+          {
+            FOUR_C_THROW(
+                "The last phase of the time-switched boundary condition definition {} ends at "
+                "{}, before the end of the simulation at {} ({} steps of {}).",
+                definition.id, phase.end_time, end_time_of_simulation, dynamics.number_of_steps,
+                dt);
+          }
+
+          const ConstrainedVariable variable = phase.variable == InputTimeSwitched::Variable::Flow
+                                                   ? ConstrainedVariable::Flow
+                                                   : ConstrainedVariable::Pressure;
+          schedule.phases.push_back(PhaseSchedule::Phase{.variable = variable,
+              .value = TimeFunction{.function_id = phase.function_id,
+                  .function = &function_manager.function_by_id<Core::Utils::FunctionOfTime>(
+                      phase.function_id)},
+              .end_time = phase.end_time});
+          previous_end_time = phase.end_time;
+        }
+
+        return schedule;
+      }
+
+      /**
        * The definitions of the input file and the `bc_id`s of the mesh must describe the same set
        * of boundary conditions: every id used by the mesh needs a definition, and every definition
        * needs at least one node. Definition ids must be unique across all condition types
@@ -219,6 +384,7 @@ namespace ReducedLung
         for (const auto& definition : bc_parameters.flow) check_id(definition.id);
         for (const auto& definition : bc_parameters.volume_dependent_pleural_pressure)
           check_id(definition.id);
+        for (const auto& definition : bc_parameters.time_switched) check_id(definition.id);
 
         for (const int bc_id : bc_nodes | std::views::keys)
         {
@@ -238,9 +404,10 @@ namespace ReducedLung
        * so a broken one fails identically everywhere.
        */
       std::map<int, BoundaryConditionModel> resolve_boundary_condition_definitions(
-          const ReducedLungParameters::BoundaryConditions& bc_parameters,
+          const ReducedLungParameters& parameters,
           const Core::Utils::FunctionManager& function_manager)
       {
+        const auto& bc_parameters = parameters.boundary_conditions;
         std::map<int, BoundaryConditionModel> definitions;
 
         const auto add_model = [&](int id, ConstrainedVariable variable, ValueModel value_model)
@@ -266,6 +433,13 @@ namespace ReducedLung
         for (const auto& definition : bc_parameters.volume_dependent_pleural_pressure)
         {
           add_model(definition.id, ConstrainedVariable::Pressure, make_value_model(definition));
+        }
+        for (const auto& definition : bc_parameters.time_switched)
+        {
+          auto schedule = make_phase_schedule(definition, parameters.dynamics, function_manager);
+          // The variable of the first phase; the constrained dof follows the active phase.
+          const auto variable = schedule.phases.front().variable;
+          add_model(definition.id, variable, std::move(schedule));
         }
 
         return definitions;
@@ -298,6 +472,10 @@ namespace ReducedLung
       global_equation_id.clear();
       global_dof_id.clear();
       local_dof_id.clear();
+      inlet_pressure_global_dof_id.clear();
+      inlet_flow_global_dof_id.clear();
+      inlet_pressure_local_dof_id.clear();
+      inlet_flow_local_dof_id.clear();
     }
 
     void BoundaryConditionData::reserve(size_t count)
@@ -323,6 +501,26 @@ namespace ReducedLung
       local_dof_id.push_back(0);
     }
 
+    void BoundaryConditionData::add_inlet_dofs(
+        int inlet_pressure_global_dof_id_value, int inlet_flow_global_dof_id_value)
+    {
+      inlet_pressure_global_dof_id.push_back(inlet_pressure_global_dof_id_value);
+      inlet_flow_global_dof_id.push_back(inlet_flow_global_dof_id_value);
+      inlet_pressure_local_dof_id.push_back(0);
+      inlet_flow_local_dof_id.push_back(0);
+    }
+
+    const PhaseSchedule::Phase& PhaseSchedule::active_phase(double time) const
+    {
+      const auto it = std::ranges::find_if(
+          phases, [&](const Phase& phase) { return time <= phase.end_time + time_tolerance; });
+      FOUR_C_ASSERT_ALWAYS(it != phases.end(),
+          "No phase of a time-switched boundary condition is active at time {}; the last phase "
+          "ends at {}.",
+          time, phases.back().end_time);
+      return *it;
+    }
+
     void BoundaryConditionModel::add_condition(
         int node_id_value, int element_id_value, int local_bc_id_value, int global_dof_id_value)
     {
@@ -341,13 +539,18 @@ namespace ReducedLung
 
       const auto& bc_parameters = parameters.boundary_conditions;
       check_definition_ids(bc_parameters, bc_nodes);
-      const auto definitions =
-          resolve_boundary_condition_definitions(bc_parameters, function_manager);
+      const auto definitions = resolve_boundary_condition_definitions(parameters, function_manager);
 
       // Derived from the input, not from the models: the reduction is collective, but a model
       // only exists on the rank owning its element.
       boundary_conditions.requires_total_terminal_unit_volume =
           !bc_parameters.volume_dependent_pleural_pressure.empty();
+      boundary_conditions.time_switched_schedules.clear();
+      for (const auto& definition : bc_parameters.time_switched)
+      {
+        boundary_conditions.time_switched_schedules.emplace(
+            definition.id, std::get<PhaseSchedule>(definitions.at(definition.id).value_model));
+      }
 
       std::map<int, size_t> model_indices;
       std::map<std::pair<int, ConstrainedVariable>, int> bc_per_node_and_variable;
@@ -359,6 +562,7 @@ namespace ReducedLung
       {
         const auto& definition = definitions.at(bc_id);
         const auto variable = definition.constrained_variable;
+        const bool is_switched = std::holds_alternative<PhaseSchedule>(definition.value_model);
 
         for (const int node_id : nodes)
         {
@@ -396,17 +600,34 @@ namespace ReducedLung
                 node_id, bc_id, element_id);
           }
 
-          // Unreachable for a `bc_nodes` built from the mesh; guards callers that assemble it
-          // themselves.
-          const auto duplicate_key = std::make_pair(node_id, variable);
-          auto duplicate_it = bc_per_node_and_variable.find(duplicate_key);
-          if (duplicate_it != bc_per_node_and_variable.end())
+          if (is_switched && !is_inlet)
           {
             FOUR_C_THROW(
-                "Multiple {} boundary conditions assigned to node {} (definitions {} and {}).",
-                constrained_variable_label(variable), node_id, duplicate_it->second, bc_id);
+                "Node {} carries the time-switched boundary condition {}, but it is the outlet of "
+                "element {}. Time-switched boundary conditions are only supported on inlet nodes.",
+                node_id, bc_id, element_id + 1);
           }
-          bc_per_node_and_variable.emplace(duplicate_key, bc_id);
+
+          // Unreachable for a `bc_nodes` built from the mesh; guards callers that assemble it
+          // themselves. A switching condition constrains both variables of its node over time.
+          std::vector<ConstrainedVariable> constrained_variables{variable};
+          if (is_switched)
+          {
+            constrained_variables = {ConstrainedVariable::Pressure, ConstrainedVariable::Flow};
+          }
+          for (const auto constrained_variable : constrained_variables)
+          {
+            const auto duplicate_key = std::make_pair(node_id, constrained_variable);
+            auto duplicate_it = bc_per_node_and_variable.find(duplicate_key);
+            if (duplicate_it != bc_per_node_and_variable.end())
+            {
+              FOUR_C_THROW(
+                  "Multiple {} boundary conditions assigned to node {} (definitions {} and {}).",
+                  constrained_variable_label(constrained_variable), node_id, duplicate_it->second,
+                  bc_id);
+            }
+            bc_per_node_and_variable.emplace(duplicate_key, bc_id);
+          }
 
           int dof_offset = 0;
           switch (variable)
@@ -446,6 +667,11 @@ namespace ReducedLung
 
           auto& model = boundary_conditions.models[model_it->second];
           model.add_condition(node_id, element_id, local_bc_id, global_dof_id);
+          if (is_switched)
+          {
+            // Inlet pressure and inlet flow are the dofs 0 and 2 of the attached element.
+            model.data.add_inlet_dofs(first_dof_it->second, first_dof_it->second + 2);
+          }
           local_bc_id++;
         }
       }
@@ -495,6 +721,13 @@ namespace ReducedLung
         {
           model.data.local_dof_id[i] = locally_relevant_dof_map.lid(model.data.global_dof_id[i]);
         }
+        for (size_t i = 0; i < model.data.inlet_pressure_global_dof_id.size(); ++i)
+        {
+          model.data.inlet_pressure_local_dof_id[i] =
+              locally_relevant_dof_map.lid(model.data.inlet_pressure_global_dof_id[i]);
+          model.data.inlet_flow_local_dof_id[i] =
+              locally_relevant_dof_map.lid(model.data.inlet_flow_global_dof_id[i]);
+        }
       }
     }
 
@@ -503,6 +736,13 @@ namespace ReducedLung
       for (auto& model : boundary_conditions.models)
       {
         model.residual_evaluator = make_residual_evaluator(model.value_model);
+        if (std::holds_alternative<PhaseSchedule>(model.value_model))
+        {
+          // The constrained dof follows the active phase, so the row is rewritten in every call.
+          model.jacobian_evaluator = assemble_switched_jacobian;
+          model.has_constant_jacobian = false;
+          continue;
+        }
         // Every value model implemented so far prescribes a value that is constant over the
         // Newton solve, so the equation stays a Dirichlet row inserted once. A value model that
         // depends on the current iterate must instead assemble its own row and clear the flag.
@@ -560,11 +800,47 @@ namespace ReducedLung
       /* Boundary constraints contribute constant identity rows to the structured linearization. */
       for (const auto& model : boundary_conditions.models)
       {
+        if (std::holds_alternative<PhaseSchedule>(model.value_model))
+        {
+          continue;
+        }
         for (size_t i = 0; i < model.data.size(); ++i)
         {
           target.set_value(model.data.local_equation_id[i], model.data.local_dof_id[i], 1.0);
         }
       }
+    }
+
+    void update_switched_tree_linearization(TreeNewtonLinearSolver& target,
+        const BoundaryConditionContainer& boundary_conditions, double time)
+    {
+      for (const auto& model : boundary_conditions.models)
+      {
+        if (!std::holds_alternative<PhaseSchedule>(model.value_model))
+        {
+          continue;
+        }
+        const auto [pressure_coefficient, flow_coefficient] = switched_coefficients(model, time);
+        for (size_t i = 0; i < model.data.size(); ++i)
+        {
+          const int row = model.data.local_equation_id[i];
+          target.set_value(row, model.data.inlet_pressure_local_dof_id[i], pressure_coefficient);
+          target.set_value(row, model.data.inlet_flow_local_dof_id[i], flow_coefficient);
+        }
+      }
+    }
+
+    std::string describe_time_switched_variables(
+        const BoundaryConditionContainer& boundary_conditions, double time)
+    {
+      std::string description;
+      for (const auto& [definition_id, schedule] : boundary_conditions.time_switched_schedules)
+      {
+        if (!description.empty()) description += ", ";
+        description += std::format("bc {}: {}", definition_id,
+            constrained_variable_label(schedule.active_phase(time).variable));
+      }
+      return description;
     }
   }  // namespace BoundaryConditions
 }  // namespace ReducedLung

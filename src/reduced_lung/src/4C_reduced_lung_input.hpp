@@ -314,12 +314,40 @@ namespace ReducedLung
         NormalizedLinearExponential normalized_linear_exponential;
       };
 
+      /**
+       * One reusable boundary condition on an inlet node that changes the variable it constrains
+       * over time. Phase k prescribes its variable by its function of time for
+       * end_time[k-1] < t <= end_time[k]; the first phase starts at t = 0. Any number of nodes
+       * may carry the same id.
+       */
+      struct TimeSwitchedDefinition
+      {
+        //! The variable a phase constrains.
+        enum class Variable : std::uint8_t
+        {
+          Pressure,
+          Flow,
+        };
+
+        struct Phase
+        {
+          Variable variable;
+          int function_id;
+          double end_time;
+        };
+
+        int id;
+        std::vector<Phase> phases;
+      };
+
       //! Definitions constraining the pressure dof, prescribing it by a function of time.
       std::vector<FromFunctionDefinition> pressure;
       //! Definitions constraining the flow dof, prescribing it by a function of time.
       std::vector<FromFunctionDefinition> flow;
       //! Definitions constraining the pressure dof, prescribing it from the terminal unit volume.
       std::vector<VolumeDependentPleuralPressureDefinition> volume_dependent_pleural_pressure;
+      //! Definitions switching between a prescribed pressure and a prescribed flow over time.
+      std::vector<TimeSwitchedDefinition> time_switched;
     } boundary_conditions;
     struct AirProperties
     {

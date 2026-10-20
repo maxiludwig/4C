@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -96,6 +97,13 @@ namespace ReducedLung
       std::vector<int> global_dof_id;
       // Local dof id for the constrained variable.
       std::vector<int> local_dof_id;
+      // Global and local dof ids of the inlet pressure and the inlet flow. Only filled for models
+      // whose constrained variable switches over time; for them, global_dof_id and local_dof_id
+      // hold the dof constrained by the first phase.
+      std::vector<int> inlet_pressure_global_dof_id;
+      std::vector<int> inlet_flow_global_dof_id;
+      std::vector<int> inlet_pressure_local_dof_id;
+      std::vector<int> inlet_flow_local_dof_id;
 
       /**
        * @brief Number of entries stored in this data block.
@@ -114,6 +122,11 @@ namespace ReducedLung
        */
       void add_entry(
           int node_id_value, int element_id_value, int local_bc_id_value, int global_dof_id_value);
+      /**
+       * @brief Append the inlet dofs of the entry added last, for a switching model.
+       */
+      void add_inlet_dofs(
+          int inlet_pressure_global_dof_id_value, int inlet_flow_global_dof_id_value);
     };
 
     /**
@@ -149,9 +162,37 @@ namespace ReducedLung
         ReducedLungParameters::BoundaryConditions::VolumeDependentPleuralPressureDefinition;
 
     /**
+     * @brief An inlet condition that switches between a prescribed pressure and a prescribed flow
+     * at given times.
+     *
+     * The active phase is a pure function of time, so residual, Jacobian and tree linearization
+     * all agree on it without any switching state.
+     */
+    struct PhaseSchedule
+    {
+      struct Phase
+      {
+        ConstrainedVariable variable = ConstrainedVariable::Pressure;
+        TimeFunction value;
+        double end_time = 0.0;
+      };
+
+      //! Phases in chronological order; phase k is active for end_time[k-1] < t <= end_time[k].
+      std::vector<Phase> phases;
+      //! Absorbs the rounding error of the accumulated simulation time when comparing it to an
+      //! end_time, so a switch never moves by a timestep.
+      double time_tolerance = 0.0;
+
+      /**
+       * @brief The phase active at @p time.
+       */
+      [[nodiscard]] const Phase& active_phase(double time) const;
+    };
+
+    /**
      * @brief How a boundary condition computes the value it prescribes.
      */
-    using ValueModel = std::variant<TimeFunction, VolumeDependentPleuralPressure>;
+    using ValueModel = std::variant<TimeFunction, VolumeDependentPleuralPressure, PhaseSchedule>;
 
     /**
      * @brief Boundary condition model containing a homogeneous set of equations.
@@ -192,6 +233,9 @@ namespace ReducedLung
       double total_terminal_unit_volume = 0.0;
       //! Whether any condition needs the volume; the collective reduction is skipped otherwise.
       bool requires_total_terminal_unit_volume = false;
+      //! The schedules of all time-switched definitions by definition id. Derived from the input,
+      //! so they are known on every rank, also on ranks that own none of their entries.
+      std::map<int, PhaseSchedule> time_switched_schedules;
     };
 
     /*!
@@ -263,10 +307,25 @@ namespace ReducedLung
      * @brief Assemble boundary-condition structured tree-linearization contributions.
      *
      * Boundary conditions impose identity rows on constrained dofs; prescribed values enter only
-     * the residual, so the structured coefficients are state- and time-independent.
+     * the residual, so the structured coefficients are state- and time-independent. Models whose
+     * constrained variable switches over time are left to update_switched_tree_linearization().
      */
     void update_tree_linearization(
         TreeNewtonLinearSolver& target, const BoundaryConditionContainer& boundary_conditions);
+
+    /**
+     * @brief Assemble the tree-linearization contributions of the time-switched models at
+     * @p time: a unit coefficient on the dof the active phase constrains, zero on the other one.
+     */
+    void update_switched_tree_linearization(TreeNewtonLinearSolver& target,
+        const BoundaryConditionContainer& boundary_conditions, double time);
+
+    /**
+     * @brief Describe the variable each time-switched definition constrains at @p time, e.g.
+     * "bc 1: pressure". Empty if there is no time-switched definition. Not collective.
+     */
+    [[nodiscard]] std::string describe_time_switched_variables(
+        const BoundaryConditionContainer& boundary_conditions, double time);
   }  // namespace BoundaryConditions
 }  // namespace ReducedLung
 

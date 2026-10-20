@@ -430,11 +430,25 @@ namespace ReducedLung
         // Constant during the solve, so refresh once per timestep rather than per iteration.
         BoundaryConditions::refresh_total_terminal_unit_volume(
             boundary_conditions_, terminal_units_, comm_);
+        const bool is_root_rank = Core::Communication::my_mpi_rank(comm_) == 0;
+        // Empty unless the input has time-switched boundary conditions, so other logs stay as
+        // they are.
+        const std::string switched_variables = BoundaryConditions::describe_time_switched_variables(
+            boundary_conditions_, current_time_);
+        if (is_root_rank && switched_variables != last_switched_variables_ && step > 1)
+        {
+          std::cout << "Time-switched boundary conditions change at t = " << current_time_ << ": "
+                    << switched_variables << "\n"
+                    << std::flush;
+        }
+        last_switched_variables_ = switched_variables;
+        const std::string switched_variables_suffix =
+            switched_variables.empty() ? "" : " | " + switched_variables;
         if (nox_solver_ != nullptr)
         {
-          if (Core::Communication::my_mpi_rank(comm_) == 0)
+          if (is_root_rank)
           {
-            std::cout << "Timestep: " << step << "/" << n_timesteps_
+            std::cout << "Timestep: " << step << "/" << n_timesteps_ << switched_variables_suffix
                       << "\n----------------------------------------\n"
                       << std::flush;
           }
@@ -443,14 +457,14 @@ namespace ReducedLung
         else
         {
           const unsigned int iterations = tree_newton_solver_->solve(current_time_);
-          if (Core::Communication::my_mpi_rank(comm_) == 0)
+          if (is_root_rank)
           {
             std::ostringstream residual_norm;
             residual_norm << std::scientific << std::setprecision(2)
                           << tree_newton_solver_->last_residual_norm();
             std::cout << "Timestep " << step << "/" << n_timesteps_
                       << " | Newton iters: " << iterations << " | ||F||: " << residual_norm.str()
-                      << "\n"
+                      << switched_variables_suffix << "\n"
                       << std::flush;
           }
         }
@@ -509,6 +523,9 @@ namespace ReducedLung
       std::map<int, int> global_dof_per_ele_;
       std::map<int, std::vector<int>> global_ele_ids_per_node_;
       BoundaryConditions::BoundaryConditionContainer boundary_conditions_;
+      //! Variables of the time-switched boundary conditions in the previous timestep, to report
+      //! a switch.
+      std::string last_switched_variables_;
       Junctions::ConnectionData connections_;
       Junctions::BifurcationData bifurcations_;
 

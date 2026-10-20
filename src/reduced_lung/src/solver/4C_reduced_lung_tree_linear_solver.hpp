@@ -119,6 +119,10 @@ namespace ReducedLung
 
     /**
      * @brief Close the condensed root system and return the root inlet-pressure correction.
+     *
+     * The root boundary row a * delta_p_in + b * delta_q_in = rhs is closed with the condensed
+     * root relation delta_q_in = G * delta_p_in + h. A prescribed pressure has a = 1, b = 0, a
+     * prescribed flow a = 0, b = 1.
      */
     [[nodiscard]] double solve_root_inlet_pressure(
         const Core::LinAlg::Vector<double>& residual) const;
@@ -127,11 +131,8 @@ namespace ReducedLung
     const ReducedLungTreeMetadata& tree_metadata_;
     double pivot_tolerance_;
 
-    // Root boundary row and dof data used to close the condensed tree system.
-    BoundaryConditions::ConstrainedVariable root_boundary_variable_ =
-        BoundaryConditions::ConstrainedVariable::Pressure;
+    // Root boundary row used to close the condensed tree system.
     int root_boundary_row_ = -1;
-    int root_boundary_local_dof_ = -1;
 
     // Per-element symbolic data derived from tree metadata. The inlet pressure is the interface
     // parameter; the other element dofs form the local block condensed in the bottom-up pass.
@@ -167,8 +168,10 @@ namespace ReducedLung
     std::vector<int> child_inlet_flow_local_dof_;
     std::vector<int> parent_outlet_pressure_unknown_index_;
 
-    // Symbolic coefficient locations used by physics assembly callbacks.
-    TreeCoefficientLocation root_boundary_coefficient_;
+    // Symbolic coefficient locations used by physics assembly callbacks. The root boundary row
+    // has a location for both root inlet dofs, so the boundary condition may constrain either.
+    TreeCoefficientLocation root_boundary_pressure_coefficient_;
+    TreeCoefficientLocation root_boundary_flow_coefficient_;
     std::vector<TreeCoefficientLocation> equation_inlet_pressure_coefficients_;
     std::vector<TreeCoefficientLocation> matrix_coefficients_;
     std::vector<TreeCoefficientLocation> child_pressure_parent_coefficients_;
@@ -177,7 +180,8 @@ namespace ReducedLung
 
     // Direct coefficient values matching the symbolic locations above. Static coefficients are
     // written once; dynamic coefficients are replaced before each tree solve.
-    double root_boundary_coefficient_value_ = 0.0;
+    double root_boundary_pressure_coefficient_value_ = 0.0;
+    double root_boundary_flow_coefficient_value_ = 0.0;
     std::vector<double> equation_inlet_pressure_coefficient_values_;
     std::vector<double> matrix_coefficient_values_;
     std::vector<double> child_pressure_parent_coefficient_values_;

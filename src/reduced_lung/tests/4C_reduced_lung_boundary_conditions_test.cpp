@@ -133,6 +133,26 @@ namespace
     return input;
   }
 
+  using TimeSwitchedDefinition = InputBc::TimeSwitchedDefinition;
+  using SwitchedVariable = TimeSwitchedDefinition::Variable;
+
+  //! Flow until 0.3, pressure until 0.6, flow until 1.0 on the inlet node 0, prescribed by the
+  //! functions 1, 2 and 3; the simulation runs 10 steps of 0.1.
+  BcInput make_time_switched_parameters()
+  {
+    BcInput input{};
+    input.bc_nodes = {{1, {0}}};
+    input.parameters.dynamics.time_increment = 0.1;
+    input.parameters.dynamics.number_of_steps = 10;
+    input.parameters.boundary_conditions.time_switched = {TimeSwitchedDefinition{.id = 1,
+        .phases = {
+            {.variable = SwitchedVariable::Flow, .function_id = 1, .end_time = 0.3},
+            {.variable = SwitchedVariable::Pressure, .function_id = 2, .end_time = 0.6},
+            {.variable = SwitchedVariable::Flow, .function_id = 3, .end_time = 1.0},
+        }}};
+    return input;
+  }
+
   //! The model holding the entries of the definition with the given id, if this rank owns any.
   BoundaryConditionModel* find_model(BoundaryConditionContainer& container, int definition_id)
   {
@@ -649,5 +669,254 @@ namespace
             fixture.ele_ids_per_node, fixture.global_dof_per_ele, fixture.first_global_dof_of_ele,
             function_manager, boundary_conditions),
         Core::Exception, "is defined more than once");
+  }
+
+  //! Boundary conditions with equation and dof ids assigned as in the reduced lung setup, for a
+  //! column map holding the dofs 0 (inlet pressure) and 2 (inlet flow) of element 0.
+  struct SwitchedSetup
+  {
+    BoundaryConditionContainer boundary_conditions;
+    Core::LinAlg::Map col_map;
+    Core::LinAlg::Map row_map;
+  };
+
+  SwitchedSetup make_switched_setup(
+      const BoundaryConditionFixture& fixture, const Core::Utils::FunctionManager& function_manager)
+  {
+    auto boundary_conditions = create_boundary_conditions_from_fixture(fixture, function_manager);
+    int n_local_equations = 0;
+    assign_local_equation_ids(boundary_conditions, n_local_equations);
+    std::array<int, 2> global_dofs{0, 2};
+    Core::LinAlg::Map col_map(-1, global_dofs.size(), global_dofs.data(), 0, MPI_COMM_WORLD);
+    assign_local_dof_ids(col_map, boundary_conditions);
+    create_evaluators(boundary_conditions);
+    Core::LinAlg::Map row_map(-1, n_local_equations, 0, MPI_COMM_WORLD);
+    return SwitchedSetup{std::move(boundary_conditions), col_map, row_map};
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedCreatesOneModelWithBothInletDofs)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    fixture.set_bc_input(make_time_switched_parameters());
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    auto boundary_conditions = create_boundary_conditions_from_fixture(fixture, function_manager);
+
+    ASSERT_EQ(boundary_conditions.models.size(), 1u);
+    const auto& model = boundary_conditions.models.front();
+    ASSERT_TRUE(std::holds_alternative<PhaseSchedule>(model.value_model));
+    // The model starts out constraining the variable of the first phase.
+    EXPECT_EQ(model.constrained_variable, ConstrainedVariable::Flow);
+    EXPECT_EQ(model.data.global_dof_id, (std::vector<int>{2}));
+    EXPECT_EQ(model.data.inlet_pressure_global_dof_id, (std::vector<int>{0}));
+    EXPECT_EQ(model.data.inlet_flow_global_dof_id, (std::vector<int>{2}));
+
+    const auto& schedule = std::get<PhaseSchedule>(model.value_model);
+    ASSERT_EQ(schedule.phases.size(), 3u);
+    EXPECT_EQ(schedule.phases[1].variable, ConstrainedVariable::Pressure);
+    EXPECT_EQ(schedule.phases[1].value.function_id, 2);
+    EXPECT_TRUE(boundary_conditions.time_switched_schedules.contains(1));
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedActivePhaseFollowsTime)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    fixture.set_bc_input(make_time_switched_parameters());
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    auto boundary_conditions = create_boundary_conditions_from_fixture(fixture, function_manager);
+    const auto& schedule = boundary_conditions.time_switched_schedules.at(1);
+
+    const auto variable_at = [&](double time) { return schedule.active_phase(time).variable; };
+    EXPECT_EQ(variable_at(0.1), ConstrainedVariable::Flow);
+    EXPECT_EQ(variable_at(0.3), ConstrainedVariable::Flow);
+    EXPECT_EQ(variable_at(0.4), ConstrainedVariable::Pressure);
+    EXPECT_EQ(variable_at(0.6), ConstrainedVariable::Pressure);
+    EXPECT_EQ(variable_at(0.7), ConstrainedVariable::Flow);
+    EXPECT_EQ(variable_at(1.0), ConstrainedVariable::Flow);
+
+    // The time loop accumulates the time, which misses the end time by a rounding error. The
+    // switch must still happen after the step ending at 0.3, not one step later or earlier.
+    double accumulated_time = 0.0;
+    for (int step = 0; step < 3; ++step) accumulated_time += 0.1;
+    ASSERT_NE(accumulated_time, 0.3);
+    EXPECT_EQ(variable_at(accumulated_time), ConstrainedVariable::Flow);
+    EXPECT_EQ(variable_at(accumulated_time + 0.1), ConstrainedVariable::Pressure);
+
+    EXPECT_EQ(describe_time_switched_variables(boundary_conditions, 0.4), "bc 1: pressure");
+    EXPECT_EQ(describe_time_switched_variables(boundary_conditions, 0.8), "bc 1: flow");
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedResidualConstrainsDofOfActivePhase)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    fixture.set_bc_input(make_time_switched_parameters());
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    auto setup = make_switched_setup(fixture, function_manager);
+
+    Core::LinAlg::Vector<double> rhs(setup.row_map, true);
+    Core::LinAlg::Vector<double> locally_relevant_dofs(setup.col_map, true);
+    locally_relevant_dofs.get_values()[0] = 10.0;  // inlet pressure
+    locally_relevant_dofs.get_values()[1] = 4.0;   // inlet flow
+
+    const int row = setup.boundary_conditions.models.front().data.local_equation_id[0];
+    const auto residual_at = [&](double time)
+    {
+      update_residual_vector(rhs, setup.boundary_conditions, locally_relevant_dofs, time);
+      return rhs.local_values_as_span()[row];
+    };
+    EXPECT_DOUBLE_EQ(residual_at(0.2), 4.0 - 1.0);
+    EXPECT_DOUBLE_EQ(residual_at(0.5), 10.0 - 2.0);
+    EXPECT_DOUBLE_EQ(residual_at(0.9), 4.0 - 3.0);
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedJacobianKeepsBothColumnsAcrossSwitch)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    fixture.set_bc_input(make_time_switched_parameters());
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    auto setup = make_switched_setup(fixture, function_manager);
+
+    Core::LinAlg::SparseMatrix jac(setup.row_map, setup.col_map, 2);
+    Core::LinAlg::Vector<double> locally_relevant_dofs(setup.col_map, true);
+    const int row = setup.boundary_conditions.models.front().data.local_equation_id[0];
+
+    const auto expect_row = [&](double pressure_value, double flow_value)
+    {
+      int n_entries = 0;
+      double* values = nullptr;
+      int* cols = nullptr;
+      jac.extract_my_row_view(row, n_entries, values, cols);
+      ASSERT_EQ(n_entries, 2);
+      for (int entry = 0; entry < n_entries; ++entry)
+      {
+        // Local dof 0 is the inlet pressure, local dof 1 the inlet flow.
+        EXPECT_DOUBLE_EQ(values[entry], cols[entry] == 0 ? pressure_value : flow_value);
+      }
+    };
+
+    update_jacobian(jac, setup.boundary_conditions, locally_relevant_dofs, 0.1);
+    jac.complete();
+    expect_row(0.0, 1.0);
+
+    // The matrix is filled now, so the switch must replace the values in the existing graph.
+    update_jacobian(jac, setup.boundary_conditions, locally_relevant_dofs, 0.5);
+    expect_row(1.0, 0.0);
+    update_jacobian(jac, setup.boundary_conditions, locally_relevant_dofs, 0.8);
+    expect_row(0.0, 1.0);
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedRejectsUnsortedPhases)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    auto input = make_time_switched_parameters();
+    input.parameters.boundary_conditions.time_switched[0].phases[1].end_time = 0.3;
+    fixture.set_bc_input(std::move(input));
+
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    FOUR_C_EXPECT_THROW_WITH_MESSAGE(
+        create_boundary_conditions_from_fixture(fixture, function_manager), Core::Exception,
+        "must be sorted by strictly increasing end_time");
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedRejectsEmptyPhases)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    auto input = make_time_switched_parameters();
+    input.parameters.boundary_conditions.time_switched[0].phases.clear();
+    fixture.set_bc_input(std::move(input));
+
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    FOUR_C_EXPECT_THROW_WITH_MESSAGE(
+        create_boundary_conditions_from_fixture(fixture, function_manager), Core::Exception,
+        "needs at least one phase");
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedRejectsSwitchOffTimeGrid)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    auto input = make_time_switched_parameters();
+    input.parameters.boundary_conditions.time_switched[0].phases[0].end_time = 0.35;
+    fixture.set_bc_input(std::move(input));
+
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    FOUR_C_EXPECT_THROW_WITH_MESSAGE(
+        create_boundary_conditions_from_fixture(fixture, function_manager), Core::Exception,
+        "is not a multiple of the time_increment");
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedRejectsLastPhaseBeforeSimulationEnd)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    auto input = make_time_switched_parameters();
+    input.parameters.dynamics.number_of_steps = 11;
+    fixture.set_bc_input(std::move(input));
+
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    FOUR_C_EXPECT_THROW_WITH_MESSAGE(
+        create_boundary_conditions_from_fixture(fixture, function_manager), Core::Exception,
+        "before the end of the simulation");
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedRejectsUnknownFunction)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    fixture.set_bc_input(make_time_switched_parameters());
+
+    auto function_manager = make_function_manager({1.0, 2.0});
+    FOUR_C_EXPECT_THROW_WITH_MESSAGE(
+        create_boundary_conditions_from_fixture(fixture, function_manager), Core::Exception,
+        "FUNCT3");
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedRejectsOutletNode)
+  {
+    skip_if_parallel();
+
+    auto fixture = make_fixture();
+    auto input = make_time_switched_parameters();
+    input.bc_nodes = {{1, {2}}};
+    fixture.set_bc_input(std::move(input));
+
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    FOUR_C_EXPECT_THROW_WITH_MESSAGE(
+        create_boundary_conditions_from_fixture(fixture, function_manager), Core::Exception,
+        "only supported on inlet nodes");
+  }
+
+  TEST(BoundaryConditionsTests, TimeSwitchedClashesWithFlowOnSameNode)
+  {
+    skip_if_parallel();
+
+    // The switching condition constrains the flow in some phases, so a flow condition on the
+    // same node is rejected even though the first phase prescribes the pressure.
+    auto fixture = make_fixture();
+    auto input = make_time_switched_parameters();
+    std::swap(input.parameters.boundary_conditions.time_switched[0].phases[0].variable,
+        input.parameters.boundary_conditions.time_switched[0].phases[1].variable);
+    input.bc_nodes[2] = {0};
+    input.parameters.boundary_conditions.flow = {make_definition(2, 1)};
+    fixture.set_bc_input(std::move(input));
+
+    auto function_manager = make_function_manager({1.0, 2.0, 3.0});
+    FOUR_C_EXPECT_THROW_WITH_MESSAGE(
+        create_boundary_conditions_from_fixture(fixture, function_manager), Core::Exception,
+        "Multiple flow boundary conditions assigned to node 0");
   }
 }  // namespace

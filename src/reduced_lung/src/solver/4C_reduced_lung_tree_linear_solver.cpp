@@ -140,9 +140,7 @@ namespace ReducedLung
   void TreeNewtonLinearSolver::build_symbolic_plan()
   {
     const auto& root_boundary = tree_root_inlet_boundary(tree_metadata_);
-    root_boundary_variable_ = root_boundary.constrained_variable;
     root_boundary_row_ = root_boundary.local_equation_id;
-    root_boundary_local_dof_ = root_boundary.local_dof_id;
 
     const int element_count = static_cast<int>(tree_metadata_.elements.size());
     global_element_id_.assign(static_cast<std::size_t>(element_count), -1);
@@ -265,13 +263,17 @@ namespace ReducedLung
     child_pressure_slope_.assign(child_element_index_.size(), 0.0);
     child_pressure_intercept_.assign(child_element_index_.size(), 0.0);
 
-    root_boundary_coefficient_ = {root_boundary_row_, root_boundary_local_dof_};
+    const auto& root_element =
+        tree_metadata_.elements[static_cast<std::size_t>(tree_metadata_.root_element_index)];
+    root_boundary_pressure_coefficient_ = {root_boundary_row_, root_element.local_dof_ids[0]};
+    root_boundary_flow_coefficient_ = {root_boundary_row_, root_element.local_dof_ids[2]};
     equation_inlet_pressure_coefficients_.assign(unknown_global_dof_ids_.size(), {});
     matrix_coefficients_.assign(static_cast<std::size_t>(matrix_entry_count), {});
     child_pressure_parent_coefficients_.assign(child_element_index_.size(), {});
     child_pressure_child_coefficients_.assign(child_element_index_.size(), {});
     child_flow_coefficients_.assign(child_element_index_.size(), {});
-    root_boundary_coefficient_value_ = 0.0;
+    root_boundary_pressure_coefficient_value_ = 0.0;
+    root_boundary_flow_coefficient_value_ = 0.0;
     equation_inlet_pressure_coefficient_values_.assign(unknown_global_dof_ids_.size(), 0.0);
     matrix_coefficient_values_.assign(static_cast<std::size_t>(matrix_entry_count), 0.0);
     child_pressure_parent_coefficient_values_.assign(child_element_index_.size(), 0.0);
@@ -331,7 +333,7 @@ namespace ReducedLung
     // coefficient storage without searching all coefficients used by the symbolic plan.
     std::vector<PendingDirectCoefficientEntry> pending_direct_coefficients;
     pending_direct_coefficients.reserve(
-        1 + equation_inlet_pressure_coefficients_.size() + matrix_coefficients_.size() +
+        2 + equation_inlet_pressure_coefficients_.size() + matrix_coefficients_.size() +
         child_pressure_parent_coefficients_.size() + child_pressure_child_coefficients_.size() +
         child_flow_coefficients_.size());
     int max_direct_coefficient_row = -1;
@@ -349,8 +351,10 @@ namespace ReducedLung
       });
       max_direct_coefficient_row = std::max(max_direct_coefficient_row, location.local_row);
     };
-    register_direct_coefficient(
-        root_boundary_coefficient_, root_boundary_coefficient_value_, "root inlet boundary");
+    register_direct_coefficient(root_boundary_pressure_coefficient_,
+        root_boundary_pressure_coefficient_value_, "root inlet pressure boundary");
+    register_direct_coefficient(root_boundary_flow_coefficient_,
+        root_boundary_flow_coefficient_value_, "root inlet flow boundary");
     for (std::size_t i = 0; i < equation_inlet_pressure_coefficients_.size(); ++i)
     {
       register_direct_coefficient(equation_inlet_pressure_coefficients_[i],
@@ -523,30 +527,21 @@ namespace ReducedLung
   double TreeNewtonLinearSolver::solve_root_inlet_pressure(
       const Core::LinAlg::Vector<double>& residual) const
   {
-    // Prescribed boundary residuals are assembled as unknown - prescribed_value, so this is 1.0.
-    const double root_boundary_coeff = required_matrix_value(
-        root_boundary_coefficient_value_, pivot_tolerance_, "root inlet boundary");
     const std::size_t root_element_index_size =
         static_cast<std::size_t>(tree_metadata_.root_element_index);
     const double root_boundary_rhs = rhs_value(residual, root_boundary_row_);
-    if (root_boundary_variable_ == BoundaryConditions::ConstrainedVariable::Pressure)
-    {
-      return root_boundary_rhs / root_boundary_coeff;
-    }
+    const double pressure_coefficient = root_boundary_pressure_coefficient_value_;
+    const double flow_coefficient = root_boundary_flow_coefficient_value_;
+    const double root_subtree_slope = subtree_relation_g_[root_element_index_size];
+    const double root_subtree_intercept = subtree_relation_h_[root_element_index_size];
 
-    if (root_boundary_variable_ == BoundaryConditions::ConstrainedVariable::Flow)
-    {
-      const double root_subtree_slope = subtree_relation_g_[root_element_index_size];
-      FOUR_C_ASSERT_ALWAYS(std::abs(root_subtree_slope) > pivot_tolerance_,
-          "TreeNewtonLinearSolver root inlet flow boundary cannot determine the root inlet "
-          "pressure because the condensed root flow relation has a near-zero pressure slope.");
-      return (root_boundary_rhs / root_boundary_coeff -
-                 subtree_relation_h_[root_element_index_size]) /
-             root_subtree_slope;
-    }
-
-    FOUR_C_THROW("TreeNewtonLinearSolver found an unsupported root inlet boundary type.");
-    return 0.0;
+    const double denominator = pressure_coefficient + flow_coefficient * root_subtree_slope;
+    FOUR_C_ASSERT_ALWAYS(std::abs(denominator) > pivot_tolerance_,
+        "TreeNewtonLinearSolver cannot determine the root inlet pressure correction: the root "
+        "boundary row (pressure coefficient {}, flow coefficient {}) closed with the condensed "
+        "root flow relation (pressure slope {}) is singular.",
+        pressure_coefficient, flow_coefficient, root_subtree_slope);
+    return (root_boundary_rhs - flow_coefficient * root_subtree_intercept) / denominator;
   }
 
   void TreeNewtonLinearSolver::solve_with_coefficients(

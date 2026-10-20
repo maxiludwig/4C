@@ -1585,6 +1585,10 @@ four_c_test(TEST_FILE reduced_lung_aw_bifurcation_no_flow.4C.yaml NP 2 REQUIRED_
 four_c_test(TEST_FILE reduced_lung_aw_bifurcation_flow.4C.yaml REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_aw_bifurcation_flow.4C.yaml NP 2 REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_aw_bifurcation_flow_newton_tree.4C.yaml REQUIRED_DEPENDENCIES VTK)
+four_c_test(
+  TEST_FILE reduced_lung_aw_bifurcation_flow_newton_tree_time_switched.4C.yaml REQUIRED_DEPENDENCIES
+            VTK
+  )
 four_c_test(TEST_FILE reduced_lung_3_aw_2_tu.4C.yaml REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_3_aw_2_tu.4C.yaml NP 3 REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_3_aw_2_tu_pleural_pressure.4C.yaml REQUIRED_DEPENDENCIES VTK)
@@ -1599,6 +1603,10 @@ four_c_test(TEST_FILE reduced_lung_terminal_unit_newton_tree.4C.yaml REQUIRED_DE
 four_c_test(TEST_FILE reduced_lung_terminal_unit_recruitment_pressure_only.4C.yaml REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_terminal_unit_recruitment_pressure_time.4C.yaml REQUIRED_DEPENDENCIES VTK)
 four_c_test(TEST_FILE reduced_lung_terminal_unit_recruitment_mixed.4C.yaml REQUIRED_DEPENDENCIES VTK)
+four_c_test(TEST_FILE reduced_lung_inlet_time_switched.4C.yaml REQUIRED_DEPENDENCIES VTK)
+four_c_test(
+  TEST_FILE reduced_lung_inlet_time_switched_single_flow.4C.yaml REQUIRED_DEPENDENCIES VTK
+  )
 four_c_test(TEST_FILE reduced_lung_1d_pipe_flow_continuous.4C.yaml NP 2)
 four_c_test(TEST_FILE reduced_lung_1d_pipe_flow_discontinuous.4C.yaml NP 2)
 four_c_test(TEST_FILE reduced_lung_1d_pipe_flow_junction.4C.yaml NP 2)

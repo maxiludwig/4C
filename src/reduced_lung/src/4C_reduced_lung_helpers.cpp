@@ -153,6 +153,14 @@ namespace ReducedLung
           TerminalUnits::update_tree_linearization(
               target, terminal_units, locally_relevant_dofs, time_step_size_dt);
         });
+    pipeline.tree_linearization_assemblers.emplace_back(
+        [&boundary_conditions](TreeNewtonLinearSolver& target,
+            const Core::LinAlg::Vector<double>& /*locally_relevant_dofs*/, double current_time,
+            double /*time_step_size_dt*/)
+        {
+          BoundaryConditions::update_switched_tree_linearization(
+              target, boundary_conditions, current_time);
+        });
 
     pipeline.state_updaters.emplace_back(
         [&airways](

@@ -216,6 +216,26 @@ namespace
     return problem;
   }
 
+  //! Replace the root inlet condition by one switching pressure (function 1) -> flow
+  //! (function 3) -> pressure (function 1), each phase lasting two steps.
+  void set_time_switched_root_boundary(TestProblem& problem)
+  {
+    using InputBc = ReducedLungParameters::BoundaryConditions;
+    using Variable = InputBc::TimeSwitchedDefinition::Variable;
+    auto& boundary_conditions = problem.parameters.boundary_conditions;
+    std::erase_if(boundary_conditions.pressure, [](const auto& bc) { return bc.id == 1; });
+    std::erase_if(boundary_conditions.flow, [](const auto& bc) { return bc.id == 1; });
+
+    const double dt = problem.parameters.dynamics.time_increment;
+    boundary_conditions.time_switched = {InputBc::TimeSwitchedDefinition{.id = 1,
+        .phases = {
+            {.variable = Variable::Pressure, .function_id = 1, .end_time = 2 * dt},
+            {.variable = Variable::Flow, .function_id = 3, .end_time = 4 * dt},
+            {.variable = Variable::Pressure, .function_id = 1, .end_time = 6 * dt},
+        }}};
+    problem.parameters.dynamics.number_of_steps = 6;
+  }
+
   TestProblem make_bifurcation_parameters(double dt)
   {
     TestProblem problem;
@@ -871,5 +891,14 @@ namespace
     problem.parameters.dynamics.number_of_steps = 2;
     compare_all_solver_workflows("tree_workflow_mixed_airways_terminal_units", problem,
         {"0.5*t", "0.0"}, {.terminal_unit_volumes = true, .bifurcation_flow_balance = true});
+  }
+
+  TEST(ReducedLungTreeWorkflowTests, TimeSwitchedRootInletBoundaryMatchesNox)
+  {
+    auto problem = make_mixed_airway_terminal_unit_parameters(0.25);
+    set_time_switched_root_boundary(problem);
+    compare_all_solver_workflows("tree_workflow_time_switched_root_inlet", problem,
+        {"0.5*t", "0.0", "-0.2*t"},
+        {.terminal_unit_volumes = true, .bifurcation_flow_balance = true});
   }
 }  // namespace
